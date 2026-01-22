@@ -97,6 +97,91 @@ def predict(
     return boxes, logits.max(dim=1)[0], phrases
 
 
+def predict_batch(
+        model,
+        images: torch.Tensor,
+        caption: str,
+        box_threshold: float,
+        text_threshold: float,
+        device: str = "cuda",
+        remove_combined: bool = False
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]]]:
+    """
+    Batched variant of `predict` that shares tokenization and text encoding.
+
+    Args:
+        model: GroundingDINO model instance.
+        images: Tensor of shape (B, 3, H, W) or list of tensors; each already preprocessed.
+        caption: Text prompt used for all images in the batch.
+        box_threshold: Objectness threshold applied to query logits.
+        text_threshold: Token activation threshold for phrase extraction.
+        device: Inference device.
+        remove_combined: Whether to suppress combined (punctuation-separated) phrases.
+
+    Returns:
+        batch_boxes: list of tensors (num_dets_i, 4) in cxcywh normalized coords.
+        batch_scores: list of tensors (num_dets_i,) with confidence per detection.
+        batch_phrases: list of phrase lists per image.
+    """
+    caption = preprocess_caption(caption)
+
+    if isinstance(images, (list, tuple)):
+        images = torch.stack(list(images))
+
+    model = model.to(device)
+    images = images.to(device)
+
+    with torch.no_grad():
+        outputs = model(images, captions=[caption] * images.shape[0])
+
+    prediction_logits = outputs["pred_logits"].sigmoid().cpu()  # (B, nq, 256)
+    prediction_boxes = outputs["pred_boxes"].cpu()  # (B, nq, 4)
+
+    tokenizer = model.tokenizer
+    tokenized = tokenizer(caption)
+
+    if remove_combined:
+        sep_idx = [
+            i for i, tok in enumerate(tokenized["input_ids"])
+            if tok in [101, 102, 1012]  # [CLS], [SEP], '.'
+        ]
+
+    batch_boxes: List[torch.Tensor] = []
+    batch_scores: List[torch.Tensor] = []
+    batch_phrases: List[List[str]] = []
+
+    for logits_per_image, boxes_per_image in zip(prediction_logits, prediction_boxes):
+        mask = logits_per_image.max(dim=1)[0] > box_threshold
+        logits = logits_per_image[mask]
+        boxes = boxes_per_image[mask]
+
+        scores = logits.max(dim=1)[0] if logits.numel() > 0 else torch.empty(0)
+
+        if remove_combined:
+            phrases = []
+            for logit in logits:
+                max_idx = logit.argmax()
+                insert_idx = bisect.bisect_left(sep_idx, max_idx)
+                right_idx = sep_idx[insert_idx]
+                left_idx = sep_idx[insert_idx - 1]
+                phrases.append(
+                    get_phrases_from_posmap(
+                        logit > text_threshold, tokenized, tokenizer, left_idx, right_idx
+                    ).replace(".", "")
+                )
+        else:
+            phrases = [
+                get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace(".", "")
+                for logit in logits
+            ]
+
+        batch_boxes.append(boxes)
+        batch_scores.append(scores)
+        batch_phrases.append(phrases)
+
+    return batch_boxes, batch_scores, batch_phrases
+
+
 def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str]) -> np.ndarray:
     """    
     This function annotates an image with bounding boxes and labels.
