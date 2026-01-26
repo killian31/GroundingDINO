@@ -104,7 +104,8 @@ def predict_batch(
         box_threshold: float,
         text_threshold: float,
         device: str = "cuda",
-        remove_combined: bool = False
+        remove_combined: bool = False,
+        return_phrases: bool = True
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[str]]]:
     """
     Batched variant of `predict` that shares tokenization and text encoding.
