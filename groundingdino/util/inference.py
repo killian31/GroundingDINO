@@ -64,7 +64,7 @@ def predict(
     model = model.to(device)
     image = image.to(device)
 
-    with torch.no_grad():
+    with torch.no_grad(), sdpa_kernel_fallback():
         outputs = model(image[None], captions=[caption])
 
     prediction_logits = outputs["pred_logits"].cpu().sigmoid()[0]  # prediction_logits.shape = (nq, 256)
